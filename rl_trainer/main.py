@@ -8,6 +8,7 @@ import sys
 base_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(base_dir))
 from algo.ddpg import DDPG
+from algo.mappo import MAPPO
 from common import *
 from log_path import *
 from env.chooseenv import make
@@ -47,7 +48,8 @@ def main(args):
     writer = SummaryWriter(str(log_dir))
     save_config(args, log_dir)
 
-    model = DDPG(obs_dim, act_dim, ctrl_agent_num, args)
+    # model = DDPG(obs_dim, act_dim, ctrl_agent_num, args)
+    model = MAPPO(obs_dim, act_dim, ctrl_agent_num, args)
 
     if args.load_model:
         load_dir = os.path.join(os.path.dirname(run_dir), "run" + str(args.load_model_run))
@@ -172,6 +174,9 @@ if __name__ == '__main__':
     parser.add_argument("--load_model", action='store_true')  # 加是true；不加为false
     parser.add_argument("--load_model_run", default=2, type=int)
     parser.add_argument("--load_model_run_episode", default=4000, type=int)
+
+    # MAPPO
+    parser.add_argument('--model_dir', type=str, default='./model', help='the model directory of the policy')
 
     args = parser.parse_args()
     main(args)

@@ -49,6 +49,7 @@ def make_grid_map(board_width, board_height, beans_positions:list, snakes_positi
     snakes_map = [[[0] for _ in range(board_width)] for _ in range(board_height)]
     for index, pos in snakes_positions.items():
         for p in pos:
+            # TODO: 这里可以加入头尾信息/方向信息
             snakes_map[p[0]][p[1]][0] = index
 
     for bean in beans_positions:
@@ -75,6 +76,7 @@ def get_observations(state, agents_index, obs_dim, height, width):
     state_ = np.squeeze(state_, axis=2)
 
     observations = np.zeros((3, obs_dim))
+    # !: why different length of value np together?
     snakes_position = np.array(snakes_positions_list, dtype=object)
     beans_position = np.array(beans_positions, dtype=object).flatten()
     for i, element in enumerate(agents_index):
@@ -85,6 +87,7 @@ def get_observations(state, agents_index, obs_dim, height, width):
         head_x = snakes_positions_list[element][0][1]
         head_y = snakes_positions_list[element][0][0]
 
+        # TODO: only the surrounding 4 direction, tiny view
         head_surrounding = get_surrounding(state_, width, height, head_x, head_y)
         observations[i][2:6] = head_surrounding[:]
 
@@ -111,6 +114,7 @@ class Actor(nn.Module):
         sizes_prev = [obs_dim, HIDDEN_SIZE]
         sizes_post = [HIDDEN_SIZE, HIDDEN_SIZE, act_dim]
 
+        # TODO: simple mlp now
         self.prev_dense = mlp(sizes_prev)
         self.post_dense = mlp(sizes_post, output_activation=output_activation)
 
