@@ -4,7 +4,7 @@ base_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(base_dir))
 from common import *
 
-HIDDEN_SIZE = 256
+HIDDEN_SIZE = 1024
 
 
 class Actor(nn.Module):
@@ -39,7 +39,41 @@ class Actor(nn.Module):
 
         out = self.post_dense(out)
         return out
+    
+class SACActor(nn.Module):
+    def __init__(self, obs_dim, act_dim, num_agents, args, output_activation='softmax'):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.num_agents = num_agents
 
+        self.args = args
+
+        sizes_prev = [num_agents * obs_dim, HIDDEN_SIZE]
+        middle_prev = [HIDDEN_SIZE, HIDDEN_SIZE]
+        sizes_post = [HIDDEN_SIZE << 1, HIDDEN_SIZE, self.act_dim**self.num_agents]
+
+        self.prev_dense = mlp(sizes_prev)
+
+        if self.args.algo == "bicnet":
+            self.comm_net = LSTMNet(HIDDEN_SIZE, HIDDEN_SIZE)
+            sizes_post = [HIDDEN_SIZE << 1, HIDDEN_SIZE, self.act_dim**self.num_agents]
+        elif self.args.algo == "ddpg":
+            sizes_post = [HIDDEN_SIZE, HIDDEN_SIZE, self.act_dim**self.num_agents]
+
+        self.prev_dense = mlp(sizes_prev)
+        self.post_dense = mlp(sizes_post, output_activation=output_activation)
+
+    def forward(self, obs_batch):
+        if len(obs_batch.shape) == 2:
+            obs_batch.unsqueeze(0)
+        out = self.prev_dense(obs_batch.reshape((obs_batch.shape[0], -1)))
+
+        if self.args.algo == "bicnet":
+            out = self.comm_net(out)
+
+        out = self.post_dense(out)
+        return out
 
 class Critic(nn.Module):
     def __init__(self, obs_dim, act_dim, num_agents, args):
@@ -63,7 +97,38 @@ class Critic(nn.Module):
         self.post_dense = mlp(sizes_post)
 
     def forward(self, obs_batch, action_batch):
-        out = torch.cat((obs_batch, action_batch), dim=-1)
+        out = torch.cat((obs_batch, action_batch), dim=-1) / self.args.normalize_factor
+        out = self.prev_dense(out)
+
+        if self.args.algo == "bicnet":
+            out = self.comm_net(out)
+
+        out = self.post_dense(out)
+        return out
+    
+class SACCritic(nn.Module):
+    def __init__(self, obs_dim, act_dim, num_agents, args):
+        super().__init__()
+
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.num_agents = num_agents
+
+        self.args = args
+
+        sizes_prev = [num_agents * obs_dim, HIDDEN_SIZE]
+
+        if self.args.algo == "bicnet":
+            self.comm_net = LSTMNet(HIDDEN_SIZE, HIDDEN_SIZE)
+            sizes_post = [HIDDEN_SIZE << 1, HIDDEN_SIZE, self.act_dim**self.num_agents]
+        elif self.args.algo == "ddpg":
+            sizes_post = [HIDDEN_SIZE, HIDDEN_SIZE, self.act_dim**self.num_agents]
+
+        self.prev_dense = mlp(sizes_prev)
+        self.post_dense = mlp(sizes_post)
+
+    def forward(self, obs_batch):
+        out = obs_batch.reshape((obs_batch.shape[0], -1)) / self.args.normalize_factor
         out = self.prev_dense(out)
 
         if self.args.algo == "bicnet":

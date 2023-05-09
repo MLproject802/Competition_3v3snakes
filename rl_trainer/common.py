@@ -8,7 +8,7 @@ from torch.distributions import Categorical
 import os
 import yaml
 
-device = torch.device("cuda:1") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 
 def hard_update(source, target):
@@ -141,31 +141,26 @@ def get_observations(state, agents_index, obs_dim, height, width):
     return observations
 
 
-def get_reward(info, snake_index, reward, score):
-    snakes_position = np.array(info['snakes_position'], dtype=object)
-    beans_position = np.array(info['beans_position'], dtype=object)
-    snake_heads = [snake[0] for snake in snakes_position]
-    step_reward = np.zeros(len(snake_index))
-    for i in snake_index:
-        if score == 1:
-            step_reward[i] += 50
-        elif score == 2:
-            step_reward[i] -= 25
-        elif score == 3:
-            step_reward[i] += 10
-        elif score == 4:
-            step_reward[i] -= 5
-
-        if reward[i] > 0:
-            step_reward[i] += 20
-        else:
-            self_head = np.array(snake_heads[i])
-            dists = [np.sqrt(np.sum(np.square(other_head - self_head))) for other_head in beans_position]
-            step_reward[i] -= min(dists)
-            if reward[i] < 0:
-                step_reward[i] -= 10
-
-    return step_reward
+def get_reward(info, snake_index, reward, agent):
+    pres_length_adv = sum(info["score"][0: 3]) - sum(info["score"][3: 6])
+    delta_length_adv = pres_length_adv - agent.length_adv
+    if agent.prev_opp_segments == None or delta_length_adv <= 3:
+        agent.prev_opp_segments = info["snakes_position"][3: 6]
+        agent.length_adv = pres_length_adv
+        return delta_length_adv
+    else:
+        fake_adv = 0
+        all_surrounding = []
+        for segment in info["snakes_position"][0: 3]:
+            all_surrounding += get_attack_area(20, 10, segment[0][0], segment[0][1])
+        for opp in range(3):
+            if info["hit"][opp + 3]:
+                opp_area = get_attack_area(20, 10, info["snakes_position"][opp + 3][0][0], info["snakes_position"][opp + 3][0][1])
+                fake_adv += (1 - int(sum([a in all_surrounding for a in opp_area]) / 3)) * (len(agent.prev_opp_segments[opp]) - len(info["snakes_position"][opp + 3]))
+        agent.length_adv = pres_length_adv
+        agent.prev_opp_segments = info["snakes_position"][3: 6]
+        delta_length_adv -= fake_adv
+        return delta_length_adv
 
 
 def logits_random(act_dim, logits):
@@ -199,7 +194,12 @@ def logits_greedy(state, logits, height, width):
     snakes = snakes_positions_list
 
     logits = torch.Tensor(logits).to(device)
-    logits_action = np.array([Categorical(out).sample().item() for out in logits])
+
+    if logits.shape[-1] == 64:
+        joint_action = Categorical(logits).sample().item()
+        logits_action = np.array([int(action) for action in np.base_repr(joint_action, base=4).zfill(3)])
+    else:
+        logits_action = np.array([Categorical(out).sample().item() for out in logits])
 
     greedy_action = greedy_snake(state, beans, snakes, width, height, [3, 4, 5])
 
@@ -207,7 +207,7 @@ def logits_greedy(state, logits, height, width):
     action_list[:3] = logits_action
     action_list[3:] = greedy_action
 
-    return action_list
+    return action_list, np.array([joint_action])
 
 
 def get_surrounding(state, width, height, x, y):
@@ -218,6 +218,12 @@ def get_surrounding(state, width, height, x, y):
 
     return surrounding
 
+def get_attack_area(width, height, x, y):
+    attack_area = [[(y - 1) % height, x],
+                   [(y + 1) % height, x], 
+                   [y, (x - 1) % width], 
+                   [y, (x + 1) % width]] 
+    return attack_area
 
 def save_config(args, save_path):
     file = open(os.path.join(str(save_path), 'config.yaml'), mode='w', encoding='utf-8')

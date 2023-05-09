@@ -8,6 +8,7 @@ import sys
 base_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(base_dir))
 from algo.ddpg import DDPG
+from algo.sac import SAC
 from common import *
 from log_path import *
 from env.chooseenv import make
@@ -47,14 +48,16 @@ def main(args):
     writer = SummaryWriter(str(log_dir))
     save_config(args, log_dir)
 
-    model = DDPG(obs_dim, act_dim, ctrl_agent_num, args)
+    # model = DDPG(obs_dim, act_dim, ctrl_agent_num, args)
+    model = SAC(obs_dim, act_dim, ctrl_agent_num, args)
 
     if args.load_model:
         load_dir = os.path.join(os.path.dirname(run_dir), "run" + str(args.load_model_run))
         model.load_model(load_dir, episode=args.load_model_run_episode)
 
     episode = 0
-
+    return_logger = []
+    best_avg_reward = 0
     while episode < args.max_episodes:
 
         # Receive initial observation state s1
@@ -75,6 +78,7 @@ def main(args):
         episode += 1
         step = 0
         episode_reward = np.zeros(6)
+        positive_reward = 0
 
         while True:
 
@@ -84,67 +88,66 @@ def main(args):
 
             # ============================== add opponent actions =================================
             # we use rule-based greedy agent here. Or, you can switch to random agent.
-            actions = logits_greedy(state_to_training, logits, height, width)
+            actions, control_actions = logits_greedy(state_to_training, logits, height, width)
             # actions = logits_random(act_dim, logits)
 
             # Receive reward [r_t,i]i=1~n and observe new state s_t+1
             next_state, reward, done, _, info = env.step(env.encode(actions))
             next_state_to_training = next_state[0]
             next_obs = get_observations(next_state_to_training, ctrl_agent_index, obs_dim, height, width)
-
+            model.total_env_step += 1
             # ================================== reward shaping ========================================
             reward = np.array(reward)
             episode_reward += reward
-            if done:
-                if np.sum(episode_reward[:3]) > np.sum(episode_reward[3:]):
-                    step_reward = get_reward(info, ctrl_agent_index, reward, score=1)
-                elif np.sum(episode_reward[:3]) < np.sum(episode_reward[3:]):
-                    step_reward = get_reward(info, ctrl_agent_index, reward, score=2)
-                else:
-                    step_reward = get_reward(info, ctrl_agent_index, reward, score=0)
-            else:
-                if np.sum(episode_reward[:3]) > np.sum(episode_reward[3:]):
-                    step_reward = get_reward(info, ctrl_agent_index, reward, score=3)
-                elif np.sum(episode_reward[:3]) < np.sum(episode_reward[3:]):
-                    step_reward = get_reward(info, ctrl_agent_index, reward, score=4)
-                else:
-                    step_reward = get_reward(info, ctrl_agent_index, reward, score=0)
+            positive_reward += np.sum(reward > 0)
 
-            done = np.array([done] * ctrl_agent_num)
+            step_reward = get_reward(info, ctrl_agent_index, reward, agent=model)
+
+            done = np.array([done])
 
             # ================================== collect data ========================================
             # Store transition in R
-            model.replay_buffer.push(obs, logits, step_reward, next_obs, done)
-
-            model.update()
+            model.replay_buffer.push(obs, control_actions, step_reward, next_obs, done)
+            
+            if model.total_env_step - model.prev_env_step >= args.num_steps_between_train_calls and model.total_env_step >= model.batch_size:
+                for _ in range(args.num_train_steps_per_train_call):
+                    eval_statistics = model.update()
+                model.prev_env_step = model.total_env_step
+                for key in eval_statistics:
+                    print(f"\t\t\t\t{key}: {eval_statistics[key]}")
 
             obs = next_obs
             state_to_training = next_state_to_training
             step += 1
 
             if args.episode_length <= step or (True in done):
+                if len(return_logger) >= args.return_log_num:
+                    return_logger.pop(0)
+                    return_logger.append(np.sum(episode_reward[0:3]))
+                else:
+                    return_logger.append(np.sum(episode_reward[0:3]))
+                pres_avg_reward = sum(return_logger) / len(return_logger)
+                if pres_avg_reward > best_avg_reward:
+                    best_avg_reward = pres_avg_reward
 
-                print(f'[Episode {episode:05d}] total_reward: {np.sum(episode_reward[0:3]):} epsilon: {model.eps:.2f}')
+                print(f'[Episode {episode:05d}] total_reward: {sum(info["score"][0: 3]) - sum(info["score"][3: 6])} epsilon: {model.eps:.2f} \t step_reward: {step_reward}')
                 print(f'\t\t\t\tsnake_1: {episode_reward[0]} '
                       f'snake_2: {episode_reward[1]} snake_3: {episode_reward[2]}')
 
                 reward_tag = 'reward'
-                loss_tag = 'loss'
                 writer.add_scalars(reward_tag, global_step=episode,
                                    tag_scalar_dict={'snake_1': episode_reward[0], 'snake_2': episode_reward[1],
                                                     'snake_3': episode_reward[2], 'total': np.sum(episode_reward[0:3])})
-                if model.c_loss and model.a_loss:
-                    writer.add_scalars(loss_tag, global_step=episode,
-                                       tag_scalar_dict={'actor': model.a_loss, 'critic': model.c_loss})
-
-                if model.c_loss and model.a_loss:
-                    print(f'\t\t\t\ta_loss {model.a_loss:.3f} c_loss {model.c_loss:.3f}')
 
                 if episode % args.save_interval == 0:
                     model.save_model(run_dir, episode)
 
                 env.reset()
+                model.length_adv = 0
+                model.prev_opp_segments = None
                 break
+    with open('/home/lymao/Competition_3v3snakes-master/return_logger.txt', 'w') as f:
+        f.write(f"alpha: {args.alpha} best_avg_reward: {best_avg_reward}")
 
 
 if __name__ == '__main__':
@@ -156,13 +159,13 @@ if __name__ == '__main__':
     parser.add_argument('--output_activation', default="softmax", type=str, help="tanh/softmax")
 
     parser.add_argument('--buffer_size', default=int(1e5), type=int)
-    parser.add_argument('--tau', default=0.001, type=float)
+    parser.add_argument('--tau', default=0.01, type=float)
     parser.add_argument('--gamma', default=0.95, type=float)
     parser.add_argument('--seed', default=1, type=int)
     parser.add_argument('--a_lr', default=0.0001, type=float)
-    parser.add_argument('--c_lr', default=0.0001, type=float)
-    parser.add_argument('--batch_size', default=64, type=int)
-    parser.add_argument('--epsilon', default=0.5, type=float)
+    parser.add_argument('--c_lr', default=0.001, type=float)
+    parser.add_argument('--batch_size', default=512, type=int)
+    parser.add_argument('--epsilon', default=0.0, type=float)
     parser.add_argument('--epsilon_speed', default=0.99998, type=float)
 
     parser.add_argument("--save_interval", default=1000, type=int)
@@ -173,5 +176,20 @@ if __name__ == '__main__':
     parser.add_argument("--load_model_run", default=2, type=int)
     parser.add_argument("--load_model_run_episode", default=4000, type=int)
 
+    # sac parameters
+    parser.add_argument("--reward_scale", default=0.5, type=float)
+    parser.add_argument("--alpha", default=0.1, type=float)
+    parser.add_argument("--alpha_lr", default=0.0001, type=float)
+    parser.add_argument("--return_log_num", default=10, type=int)
+    parser.add_argument("--num_steps_between_train_calls", default=100, type=int)
+    parser.add_argument("--num_train_steps_per_train_call", default=100, type=int)
+    parser.add_argument("--normalize_factor", default=20.0, type=float)
+
     args = parser.parse_args()
+    # # search best alpha
+    # alpha_search_list = [0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 5.0, 10.0]
+    # for alpha in alpha_search_list:
+    #     args.alpha = alpha
+    #     main(args)
+
     main(args)
